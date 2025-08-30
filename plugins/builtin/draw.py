@@ -85,7 +85,7 @@ class DrawConfig(ConfigBase):
         json_schema_extra={"ref_model_groups": True, "required": True, "model_type": "draw"},
         description="主要使用的绘图模型组，可在 `系统配置` -> `模型组` 选项卡配置",
     )
-    MODEL_MODE: Literal["自动选择", "图像生成", "聊天模式"] = Field(default="自动选择", title="绘图模型调用格式")
+    MODEL_MODE: Literal["自动选择", "图像生成", "图像生成(Nvidia)", "聊天模式"] = Field(default="自动选择", title="绘图模型调用格式")
     NUM_INFERENCE_STEPS: int = Field(default=20, title="模型推理步数")
     USE_SYSTEM_ROLE: bool = Field(
         default=False,
@@ -179,7 +179,7 @@ async def draw(
             logger.debug(f"优先使用上次成功的模式: {last_successful_mode}")
 
         # 添加未尝试过的模式
-        for mode in ["聊天模式", "图像生成"]:
+        for mode in ["聊天模式", "图像生成", "图像生成(Nvidia)"]:
             if mode not in modes_to_try:
                 modes_to_try.append(mode)
 
@@ -198,7 +198,17 @@ async def draw(
                         guidance_scale,
                         source_image_data,
                     )
-                else:  # 聊天模式
+                elif mode == "图像生成(Nvidia)":
+                    ret_file_url = await _generate_image_nvidia(
+                        model_group,
+                        prompt,
+                        config.NEGATIVE_PROMPT,
+                        size,
+                        config.NUM_INFERENCE_STEPS,
+                        guidance_scale,
+                        source_image_data,
+                    )
+                elif mode == "聊天模式": # 聊天模式
                     ret_file_url = await _chat_image(model_group, prompt, size, refer_image, source_image_data)
 
             except Exception as e:
@@ -227,7 +237,17 @@ async def draw(
             guidance_scale,
             source_image_data,
         )
-    else:
+    elif config.MODEL_MODE == "图像生成(Nvidia)":
+        result_file_url: str = await _generate_image_nvidia(
+            model_group,
+            prompt,
+            config.NEGATIVE_PROMPT,
+            size,
+            config.NUM_INFERENCE_STEPS,
+            guidance_scale,
+            source_image_data,
+        )
+    elif config.MODEL_MODE == "聊天模式":# 聊天模式
         result_file_url: str = await _chat_image(model_group, prompt, size, refer_image, source_image_data)
 
     result_sandbox_file = await _ctx.fs.mixed_forward_file(result_file_url)
@@ -281,6 +301,55 @@ async def _generate_image(
     response.raise_for_status()
     data = response.json()
     ret_url = data["data"][0]["url"]
+    if ret_url:
+        return ret_url
+    logger.error(f"绘图响应中未找到图片信息: {data}")
+    raise Exception(
+        "No image content found in image generation AI response. You can adjust the prompt and try again. Make sure the prompt is clear and detailed.",
+    )
+
+
+async def _generate_image_nvidia(
+    model_group,
+    prompt,
+    negative_prompt,
+    size,
+    num_inference_steps,
+    guidance_scale,
+    source_image_data,
+) -> str:
+    """使用图像生成模式绘图"""
+
+    # 构造请求体
+    json_data = {
+        # "model": model_group.CHAT_MODEL,
+        "prompt": prompt,
+        # "image_size": size,
+        # "batch_size": 1,
+        "seed": random.randint(0, 9999999999),
+        # "num_inference_steps": num_inference_steps,
+        # "guidance_scale": guidance_scale,
+    }
+
+    # if source_image_data != "data:image/webp;base64, XXX":
+    #     json_data["image"] = source_image_data
+    # if negative_prompt.replace(" ", "") != "":
+    #    json_data["negative_prompt"] = negative_prompt
+
+    async with AsyncClient() as client:
+        response = await client.post(
+            f"{model_group.BASE_URL}/genai/{model_group.CHAT_MODEL}",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {model_group.API_KEY}",
+            },
+            json=json_data,
+            timeout=Timeout(read=config.TIMEOUT, write=config.TIMEOUT, connect=10, pool=10),
+        )
+    response.raise_for_status()
+    data = response.json()
+    ret_url = data["artifacts"][0]["base64"]
     if ret_url:
         return ret_url
     logger.error(f"绘图响应中未找到图片信息: {data}")
